@@ -1,70 +1,142 @@
-# Getting Started with Create React App
+Agenda
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+## What's a web worker?
 
-## Available Scripts
+- JS is single thread language. All the task Layout, JS Execution, Animations all run in single thread.
+- Web worker allows you to offload task in another thread.
 
-In the project directory, you can run:
+```js
+var myWorker = new Worker("worker.js");
+```
 
-### `npm start`
+## postMessage and onmessage.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+```js
+// main.js
+myWorker.onmessage = function (e) {
+  console.log(e.data);
+  console.log("Message received from worker");
+};
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+myWorker.postMessage("Message from main thread");
+```
 
-### `npm test`
+```js
+// worker.js
+self.onmessage = (e) => {
+  console.log(e.data);
+  console.log("Message received from worker");
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+  self.postMessage(arrayBuffer, [arrayBuffer.buffer]);
+};
+```
 
-### `npm run build`
+## Structure cloning and transferrable objects
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+- On post messages passed data are structure cloned.
+- https://github.com/GoogleChromeLabs/comlink/blob/main/structured-clone-table.md
+- https://surma.dev/things/is-postmessage-slow/
+- Transferrable objects are transferred from one process to another, and once transferred, its no longer accessible on first process
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## RPC communication for async messages
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+- Sending message and receiving message is collocated and can happen out of order.
+- Request response protocol makes code more maintainable.
+- comlink has own RPC interface for cross process communication.
+- JSON-RPC is an standard protocol for cross process communication in JSON format. (https://en.wikipedia.org/wiki/JSON-RPC)
 
-### `npm run eject`
+## ES6 Proxies
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+- Proxy allows intercepting operations in a object.
+  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+```js
+const obj = {
+  a: 2,
+  b: 3,
+  sum: function () {
+    this.a + this.b;
+  }
+};
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+const handler = {
+  get: (target, prop) {} // obj.a
+  set: (target, prop, value) // obj.a = 2
+  apply: (target, thisArg, args) //obj.sum();
+}
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
 
-## Learn More
+const proxyObj = new Proxy({}, handler)
+```
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## How does comlink uses RPC and ES6 proxies to expose objects from workers to the main thread?
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+### wrap
 
-### Code Splitting
+- wrap create a proxy which virtually represent web worker exposed object.
+- On any operation to the proxy, it translates it to a path (for the property you are accessing/updating/calling) and operation (GET/SET/APPLY).
+- For apply it passes all arguments to worker.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+### expose
 
-### Analyzing the Bundle Size
+- Expose listen to the message from different process, and based on the passed path, it locates the property in worker thread, and apply defined operation.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+## How callback works with the comlink
 
-### Making a Progressive Web App
+### Transfer Handler
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+- Not all objects can structured cloned or are transferrable.
+- Transfer handler provides serialize and deserialize method, and canHandle function to check if it can handle an object.
+- The serialize method returns an object which can be transferred.
 
-### Advanced Configuration
+```js
+Comlink.transferHandlers.set("EVENT", {
+  canHandle: (obj) => obj instanceof Event,
+  serialize: (ev) => {
+    return [
+      {
+        target: {
+          id: ev.target.id,
+          classList: [...ev.target.classList],
+        },
+      },
+      [],
+    ];
+  },
+  deserialize: (obj) => obj,
+});
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+### Message Channel
 
-### Deployment
+- Message channel creates port through which data can be transferred.
+- One port is kept in one process and another is passed to different process. Ports are transferrable objects.
+- Process can communicate through this ports using postMessage and onmessage handler.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+```js
+var channel = new MessageChannel();
 
-### `npm run build` fails to minify
+channel.port1.onMessage = (e) => {};
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+channel.port2.postMessage("some data");
+```
+
+### proxyTransferHandler
+
+- serialize creates a message channel, and exposes the object through channel's one port.
+- deserialize wraps the another port of channel, and creates proxy which translates all the operations to path and operation type, and transfer this information through ports.
+
+### Handling callbacks
+
+- comlink marks the callback to be handled with proxy transfer handler.
+- callback is exposed from main thread to worker thread and proxied on worker thread.
+
+## How errors are handled with the comlink.
+
+- Error objects are not transferrable.
+- A custom transfer handler is created for transferring error object.
+
+## How transferrable object works with the comlink.
+
+- Transferrable objects are required to tracked before passing, which keeps the transferrable buffer in caches (with object as key),
+- Then while passing it as argument, it internally passes the transferrable buffer.
